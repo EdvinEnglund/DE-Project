@@ -1,78 +1,185 @@
+from __future__ import annotations
+
 from pathlib import Path
-import pandas as pd
+import subprocess
+import shutil
+
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 MIN_MB = 128
 MAX_MB = 256
 
+HDFS_BIN = str(Path.home() / "hadoop-3.4.1" / "bin" / "hdfs")
+HDFS_INPUT_DIR = "/user/ubuntu/nyc_tlc/final_downloads"
+HDFS_OUTPUT_DIR = "/user/ubuntu/nyc_tlc/final_downloads_rebalanced"
+
+STAGE_DIR = Path("/tmp/hdfs_stage_rebalance")
+LOCAL_IN = STAGE_DIR / "in"
+LOCAL_OUT = STAGE_DIR / "out"
+
+
+def run_hdfs(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run([HDFS_BIN, *args], text=True, capture_output=True)
+
+
+def ensure_hdfs_dir(path: str) -> None:
+    result = run_hdfs("dfs", "-mkdir", "-p", path)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or f"Could not create {path}")
+
+
+def list_hdfs_parquet_files(path: str) -> list[str]:
+    result = run_hdfs("dfs", "-ls", path)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or f"Could not list {path}")
+
+    files = []
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if parts and parts[-1].endswith(".parquet"):
+            files.append(parts[-1])
+    return sorted(files)
+
+
+def hdfs_get(hdfs_path: str, local_path: Path) -> None:
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+    result = run_hdfs("dfs", "-get", "-f", hdfs_path, str(local_path))
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or f"Could not get {hdfs_path}")
+
+
+def hdfs_put(local_path: Path, hdfs_path: str) -> None:
+    result = run_hdfs("dfs", "-put", "-f", str(local_path), hdfs_path)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or f"Could not put {local_path} -> {hdfs_path}")
+
+
+def hdfs_rm(hdfs_path: str) -> None:
+    result = run_hdfs("dfs", "-rm", "-f", hdfs_path)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or f"Could not remove {hdfs_path}")
+
+
 def file_size_mb(path: Path) -> float:
     return path.stat().st_size / (1024 * 1024)
 
-def combine_two_parquet_files(file1: Path, file2: Path, output_path: Path) -> None:
-    df1 = pd.read_parquet(file1)
-    df2 = pd.read_parquet(file2)
 
-    combined = pd.concat([df1, df2], ignore_index=True)
-    combined.to_parquet(output_path, index=False, compression="snappy")
+def combine_parquet(file1: Path, file2: Path, output_path: Path) -> Path:
+    table1 = pq.read_table(file1)
+    table2 = pq.read_table(file2)
+    combined = pa.concat_tables([table1, table2])
+    pq.write_table(combined, output_path, compression="snappy")
+    return output_path
 
-def split_parquet_in_two(file_path: Path, output_dir: Path) -> None:
-    df = pd.read_parquet(file_path)
 
-    midpoint = len(df) // 2
-    part1 = df.iloc[:midpoint]
-    part2 = df.iloc[midpoint:]
+def split_parquet_in_two(file_path: Path, output_dir: Path) -> list[Path]:
+    table = pq.read_table(file_path)
+    midpoint = table.num_rows // 2
 
-    stem = file_path.stem
-    out1 = output_dir / f"{stem}_split_0.parquet"
-    out2 = output_dir / f"{stem}_split_1.parquet"
+    part1 = output_dir / f"{file_path.stem}_part_0.parquet"
+    part2 = output_dir / f"{file_path.stem}_part_1.parquet"
 
-    part1.to_parquet(out1, index=False, compression="snappy")
-    part2.to_parquet(out2, index=False, compression="snappy")
+    pq.write_table(table.slice(0, midpoint), part1, compression="snappy")
+    pq.write_table(table.slice(midpoint), part2, compression="snappy")
 
-def rebalance_parquet_files(input_dir: str, output_dir: str) -> None:
-    input_path = Path(input_dir)
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
+    return [part1, part2]
 
-    files = sorted(input_path.glob("*.parquet"))
 
-    remembered_small_file = None
+def cleanup(*paths: Path | None) -> None:
+    for path in paths:
+        if path is not None:
+            path.unlink(missing_ok=True)
 
-    for file in files:
-        size_mb = file_size_mb(file)
-        print(f"Checking {file.name} ({size_mb:.1f} MB)")
 
-        if size_mb < MIN_MB:
-            if remembered_small_file is None:
-                remembered_small_file = file
-                print(f"  Remembering small file: {file.name}")
-            else:
-                out_name = (
-                    f"{remembered_small_file.stem}__{file.stem}_combined.parquet"
-                )
-                out_file = output_path / out_name
+def rebalance_hdfs() -> None:
+    ensure_hdfs_dir(HDFS_OUTPUT_DIR)
+    shutil.rmtree(STAGE_DIR, ignore_errors=True)
+    LOCAL_IN.mkdir(parents=True, exist_ok=True)
+    LOCAL_OUT.mkdir(parents=True, exist_ok=True)
 
-                print(f"  Combining {remembered_small_file.name} + {file.name}")
-                combine_two_parquet_files(remembered_small_file, file, out_file)
+    hdfs_files = list_hdfs_parquet_files(HDFS_INPUT_DIR)
+    if not hdfs_files:
+        print(f"Inga .parquet-filer hittades i {HDFS_INPUT_DIR}")
+        return
 
-                new_size = file_size_mb(out_file)
-                print(f"  Wrote {out_file.name} ({new_size:.1f} MB)")
+    output_index = 0
+    pending_small: tuple[Path, str] | None = None
 
-                remembered_small_file = None
+    def next_output_path() -> str:
+        nonlocal output_index
+        path = f"{HDFS_OUTPUT_DIR}/part_{output_index:04d}.parquet"
+        output_index += 1
+        return path
 
-        elif size_mb > MAX_MB:
-            print(f"  Splitting large file: {file.name}")
-            split_parquet_in_two(file, output_path)
+    for hdfs_path in hdfs_files:
+        local_file = LOCAL_IN / Path(hdfs_path).name
 
+        print(f"\nLaddar ner: {hdfs_path}")
+        hdfs_get(hdfs_path, local_file)
+
+        size_mb = file_size_mb(local_file)
+        print(f"Bearbetar {local_file.name} ({size_mb:.1f} MB)")
+
+        if MIN_MB <= size_mb <= MAX_MB:
+            out_path = next_output_path()
+            print(f"  OK storlek, laddar upp direkt -> {out_path}")
+            hdfs_put(local_file, out_path)
+            hdfs_rm(hdfs_path)
+            cleanup(local_file)
+            continue
+
+        if size_mb > MAX_MB:
+            print("  För stor, splittar i två delar")
+            parts = split_parquet_in_two(local_file, LOCAL_OUT)
+
+            for part in parts:
+                hdfs_put(part, next_output_path())
+
+            hdfs_rm(hdfs_path)
+            cleanup(local_file, *parts)
+            continue
+
+        # size_mb < MIN_MB
+        if pending_small is None:
+            print("  För liten, sparar för nästa kombination")
+            pending_small = (local_file, hdfs_path)
+            continue
+
+        prev_file, prev_hdfs_path = pending_small
+        combined_file = LOCAL_OUT / f"{prev_file.stem}__{local_file.stem}.parquet"
+
+        print(f"  Kombinerar {prev_file.name} + {local_file.name}")
+        combine_parquet(prev_file, local_file, combined_file)
+
+        combined_size = file_size_mb(combined_file)
+        print(f"  Kombinerad storlek: {combined_size:.1f} MB")
+
+        if combined_size <= MAX_MB:
+            hdfs_put(combined_file, next_output_path())
         else:
-            print(f"  Keeping as-is: {file.name}")
-            out_file = output_path / file.name
+            print("  Kombinerad fil blev för stor, splittar i två delar")
+            parts = split_parquet_in_two(combined_file, LOCAL_OUT)
+            for part in parts:
+                hdfs_put(part, next_output_path())
+            cleanup(*parts)
 
-            # Copy by re-writing parquet (safe and simple)
-            df = pd.read_parquet(file)
-            df.to_parquet(out_file, index=False, compression="snappy")
+        hdfs_rm(prev_hdfs_path)
+        hdfs_rm(hdfs_path)
 
-    if remembered_small_file is not None:
-        print(
-            f"Leftover small file not combined: {remembered_small_file.name} "
-            f"({file_size_mb(remembered_small_file):.1f} MB)"
-        )
+        cleanup(prev_file, local_file, combined_file)
+        pending_small = None
+
+    if pending_small is not None:
+        leftover_file, leftover_hdfs_path = pending_small
+        out_path = next_output_path()
+        print(f"\nKvarvarande liten fil: {leftover_file.name}, laddar upp som den är -> {out_path}")
+        hdfs_put(leftover_file, out_path)
+        hdfs_rm(leftover_hdfs_path)
+        cleanup(leftover_file)
+
+    print(f"\nKlart. Output finns i: {HDFS_OUTPUT_DIR}")
+
+
+if __name__ == "__main__":
+    rebalance_hdfs()

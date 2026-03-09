@@ -1,15 +1,27 @@
-import math
-import tempfile
 from pathlib import Path
-
-import pandas as pd
-import requests
+import subprocess
 import time
 
+import pyarrow as pa
+import pyarrow.compute as pc
+import pyarrow.parquet as pq
+import requests
+
+# -----------------------------
 # Config
+# -----------------------------
 TARGET_SIZE_GB = 30
-DATA_DIR = Path("data/nyc_tlc/processed_spark")
-TEMP_FILE = Path("temp_raw.parquet")
+
+# Local staging dir (temporary). Keep it small; files are deleted after upload.
+DATA_DIR = Path("data/_stage_hdfs_upload")
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+TEMP_FILE = DATA_DIR / "temp_raw.parquet"
+
+# HDFS
+HDFS_BIN = str(Path.home() / "hadoop-3.4.1" / "bin" / "hdfs")
+HDFS_DIR = "/user/ubuntu/nyc_tlc/final_downloads"
+
 KEEP_COLUMNS = [
     "tpep_pickup_datetime",
     "tpep_dropoff_datetime",
@@ -20,30 +32,77 @@ KEEP_COLUMNS = [
     "DOLocationID",
     "payment_type",
     "tip_amount",
-    "total_amount", #Perhaps import all data
+    "total_amount",
 ]
 
-# Aim for ~250 MiB output files
-TARGET_PART_MB = 250
-TARGET_PART_BYTES = TARGET_PART_MB * 1024 * 1024
+TARGET_SCHEMA = pa.schema([
+    pa.field("tpep_pickup_datetime", pa.timestamp("us")),
+    pa.field("tpep_dropoff_datetime", pa.timestamp("us")),
+    pa.field("passenger_count", pa.float64()),
+    pa.field("trip_distance", pa.float64()),
+    pa.field("RatecodeID", pa.float64()),
+    pa.field("PULocationID", pa.int32()),
+    pa.field("DOLocationID", pa.int32()),
+    pa.field("payment_type", pa.int64()),
+    pa.field("tip_amount", pa.float64()),
+    pa.field("total_amount", pa.float64()),
+])
 
-# Download timeouts: (connect timeout, read timeout)
-REQUEST_TIMEOUT = (15, 300)  # 15s to connect, 300s between bytes
+REQUEST_TIMEOUT = (15, 300)  # (connect, read)
 REQUEST_HEADERS = {"User-Agent": "Mozilla/5.0"}
-CHUNK_DOWNLOAD_BYTES = 1024 * 1024  # 1 MiB download chunks
+CHUNK_DOWNLOAD_BYTES = 1024 * 1024  # 1 MiB
 
 
-def get_current_storage_gb() -> float:
-    if not DATA_DIR.exists():
+# -----------------------------
+# HDFS helpers
+# -----------------------------
+def run_hdfs(args: list[str]) -> subprocess.CompletedProcess:
+    return subprocess.run([HDFS_BIN] + args, text=True, capture_output=True)
+
+
+def ensure_hdfs_dir() -> None:
+    r = run_hdfs(["dfs", "-mkdir", "-p", HDFS_DIR])
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr.strip() or "Failed to create HDFS dir")
+
+
+def hdfs_exists(hdfs_path: str) -> bool:
+    r = run_hdfs(["dfs", "-test", "-e", hdfs_path])
+    return r.returncode == 0
+
+
+def hdfs_put(local_path: Path, hdfs_dir: str) -> None:
+    r = run_hdfs(["dfs", "-put", "-f", str(local_path), hdfs_dir])
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr.strip() or f"Failed to upload {local_path}")
+
+
+def get_hdfs_storage_gb() -> float:
+    """
+    Returns logical size of HDFS_DIR in GB using: hdfs dfs -du -s
+    Output is typically: <bytes> <bytes_with_replication> <path>
+    We'll use the first number (logical bytes).
+    """
+    ensure_hdfs_dir()
+    r = run_hdfs(["dfs", "-du", "-s", HDFS_DIR])
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr.strip() or "Failed to compute HDFS size")
+
+    parts = r.stdout.strip().split()
+    if not parts:
         return 0.0
-    total_bytes = sum(f.stat().st_size for f in DATA_DIR.rglob("*.parquet"))
-    return total_bytes / (1024 ** 3)
+
+    logical_bytes = int(parts[0])
+    return logical_bytes / (1024 ** 3)
 
 
+# -----------------------------
+# Data helpers
+# -----------------------------
 def month_already_processed(year: int, month: int) -> bool:
     mm = f"{month:02d}"
-    sentinel = DATA_DIR / f"part_{year}_{mm}_0.parquet"
-    return sentinel.exists()
+    hdfs_path = f"{HDFS_DIR}/part_{year}_{mm}.parquet"
+    return hdfs_exists(hdfs_path)
 
 
 def download_to_temp(url: str, temp_path: Path) -> None:
@@ -55,83 +114,81 @@ def download_to_temp(url: str, temp_path: Path) -> None:
                     f.write(chunk)
 
 
-def estimate_rows_per_chunk(df: pd.DataFrame, target_bytes: int) -> int:
+def cast_and_filter_nulls(table: pa.Table) -> pa.Table:
     """
-    Estimate how many rows will produce ~target_bytes of parquet output
-    by writing a sample to a temporary parquet file and measuring it.
+    Cast columns to TARGET_SCHEMA and drop rows where ANY KEEP_COLUMNS is null.
     """
-    if df.empty:
-        return 1
+    # Cast
+    casted_cols = []
+    for field in TARGET_SCHEMA:
+        arr = table[field.name]
+        casted_cols.append(pc.cast(arr, field.type, safe=False))
+    casted = pa.Table.from_arrays(casted_cols, schema=TARGET_SCHEMA)
 
-    sample_rows = min(len(df), 100_000)
-    sample = df.iloc[:sample_rows].copy()
+    # Filter out rows with any nulls
+    mask = None
+    for name in KEEP_COLUMNS:
+        non_null = pc.invert(pc.is_null(casted[name], nan_is_null=True))
+        mask = non_null if mask is None else pc.and_(mask, non_null)
 
-    with tempfile.NamedTemporaryFile(suffix=".parquet", delete=True) as tmp:
-        sample.to_parquet(tmp.name, index=False, compression="snappy")
-        sample_size = Path(tmp.name).stat().st_size
-
-    # Avoid division by zero
-    bytes_per_row = max(sample_size / sample_rows, 1)
-
-    est_rows = int(target_bytes / bytes_per_row)
-
-    # Keep sane bounds
-    est_rows = max(est_rows, 50_000)
-    est_rows = min(est_rows, len(df))
-
-    return est_rows
+    return casted.filter(mask)
 
 
+# -----------------------------
+# Main processing
+# -----------------------------
 def process_and_save(year: int, month: int) -> bool:
     mm = f"{month:02d}"
     url = f"https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_{year}-{mm}.parquet"
 
-    # Skip if we've already created the first output file for this month
     if month_already_processed(year, month):
-        print(f"Skipping {year}-{mm}: output already exists.")
-        return True
-
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+        print(f"Skipping {year}-{mm}: output already exists in HDFS.")
+        return False
 
     try:
-        # 1) Download source parquet
+        ensure_hdfs_dir()
+
+        # 1) Download source parquet locally
         print(f"Downloading {year}-{mm} ...")
         download_to_temp(url, TEMP_FILE)
 
         # 2) Read only selected columns
-        print(f"Loading {year}-{mm} into pandas ...")
-        df = pd.read_parquet(TEMP_FILE, columns=KEEP_COLUMNS, engine="pyarrow")
+        print(f"Loading {year}-{mm} into PyArrow ...")
+        table = pq.read_table(TEMP_FILE, columns=KEEP_COLUMNS)
 
-        if df.empty:
+        if table.num_rows == 0:
             print(f"Skipping {year}-{mm}: file loaded but contains no rows.")
             return True
 
-        # 3) Estimate rows per output part to target ~250 MiB each
-        rows_per_chunk = estimate_rows_per_chunk(df, TARGET_PART_BYTES)
-        num_parts = math.ceil(len(df) / rows_per_chunk)
+        # 3) Cast + filter null rows
+        before = table.num_rows
+        table = cast_and_filter_nulls(table)
+        dropped = before - table.num_rows
+        print(f"Dropped {dropped:,} rows with nulls after casting.")
 
-        print(
-            f"Processed {year}-{mm}: {len(df):,} rows. "
-            f"Estimated rows/part: {rows_per_chunk:,} (~{TARGET_PART_MB} MB target), "
-            f"parts: {num_parts}"
-        )
+        if table.num_rows == 0:
+            print(f"Skipping {year}-{mm}: no rows left after null filtering.")
+            return True
 
-        # 4) Write chunked parquet outputs
-        for i, start in enumerate(range(0, len(df), rows_per_chunk)):
-            out_path = DATA_DIR / f"part_{year}_{mm}_{i}.parquet"
+        # 4) Write local output parquet
+        out_path = DATA_DIR / f"part_{year}_{mm}.parquet"
+        pq.write_table(table, out_path, compression="snappy")
+        actual_mb = out_path.stat().st_size / (1024 * 1024)
+        print(f"Wrote local {out_path.name} ({actual_mb:.1f} MB)")
 
-            # If rerun partially, skip existing parts
-            if out_path.exists():
-                print(f"  Skipping existing {out_path.name}")
-                continue
+        # 5) Upload to HDFS
+        hdfs_put(out_path, HDFS_DIR)
+        print(f"Uploaded to HDFS: {HDFS_DIR}/{out_path.name}")
 
-            chunk = df.iloc[start:start + rows_per_chunk]
-            chunk.to_parquet(out_path, index=False, compression="snappy")
-
-            actual_mb = out_path.stat().st_size / (1024 * 1024)
-            print(f"  Wrote {out_path.name} ({actual_mb:.1f} MB)")
+        # Optional: remove local file after upload
+        out_path.unlink(missing_ok=True)
 
         return True
+
+    except requests.HTTPError as e:
+        # e.g., 403/404 for months that don't exist or are blocked
+        print(f"Skipping {year}-{mm}: {e}")
+        return False
 
     except Exception as e:
         print(f"Skipping {year}-{mm}: {e}")
@@ -143,41 +200,38 @@ def process_and_save(year: int, month: int) -> bool:
 
 
 def run_pipeline() -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-
     year = 2025
-    min_year = 2009
+    min_year = 2025
     years_processed_counter = 0
 
-    while get_current_storage_gb() < TARGET_SIZE_GB:
-        print(f"\nCurrent data size: {get_current_storage_gb():.2f} GB")
+    while get_hdfs_storage_gb() < TARGET_SIZE_GB:
+        print(f"\nCurrent HDFS size: {get_hdfs_storage_gb():.2f} GB in {HDFS_DIR}")
 
         made_progress_this_year = False
 
         for month in range(12, 0, -1):
-            if get_current_storage_gb() >= TARGET_SIZE_GB:
+            if get_hdfs_storage_gb() >= TARGET_SIZE_GB:
                 break
 
             ok = process_and_save(year, month)
             if ok:
                 made_progress_this_year = True
-
-        years_processed_counter += 1
+        
+        if made_progress_this_year:
+            years_processed_counter += 1
 
         if year <= min_year:
             print("Reached minimum year limit.")
             break
 
-        # If every month was skipped because files existed, or every download failed,
-        # keep moving backward, but don't loop forever.
         year -= 1
 
-        if years_processed_counter % 3 == 0 and get_current_storage_gb() < TARGET_SIZE_GB:
-            print(f"\n--- Processed {years_processed_counter} years. Pausing for 5 minutes to rest the connection... ---")
+        if years_processed_counter % 3 == 0 and get_hdfs_storage_gb() < TARGET_SIZE_GB:
+            print(f"\n--- Processed {years_processed_counter} years. Pausing for 5 minutes... ---")
             time.sleep(300)
 
-        if not made_progress_this_year and year < min_year:
-            print("No progress made and minimum year reached.")
+        if year < min_year:
+            print("Minimum year reached.")
             break
 
 
