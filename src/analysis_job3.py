@@ -1,3 +1,4 @@
+import time
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import avg
 
@@ -22,9 +23,30 @@ def spark_pipeline(workers = WORKERS, executor_cores = EXECUTOR_CORES, memory = 
     spark.conf.set("spark.sql.shuffle.partitions", 2 * WORKERS * EXECUTOR_CORES)
     spark.conf.set("spark.sql.files.maxPartitionBytes", "256MB")
 
-    # Create pipe for loading and analyzing data
-    df = spark.read.parquet("hdfs:///user/ubuntu/nyc_tlc/final_downloads/").select("tip_amount", "DOLocationID")
-    result = df.groupBy("DOLocationID").agg(avg("tip_amount").alias("avg_tip"))
+    # Load parquet data
+    df = spark.read.parquet(
+        "hdfs:///user/ubuntu/nyc_tlc/final_downloads/"
+    ).select("tip_amount", "DOLocationID")
+
+    # Load mapping JSON (only boroughs needed)
+    with open("data/taxi_zone_IDs.json") as f:
+        data = json.load(f)
+    b_mapping = {int(k): v["borough"] for k, v in data.items() if k.isdigit()}
+
+    # Convert mapping to Spark DataFrame
+    borough_df = spark.createDataFrame(
+        [(k, b_mapping[k]) for k in b_mapping],
+        ["DOLocationID", "Borough"]
+    )
+
+    # Join taxi data with borough mapping
+    df_with_borough = df.join(borough_df, on="DOLocationID", how="left")
+
+    # Group by borough and compute average tip
+    result = df_with_borough.groupBy("Borough").agg(avg("tip_amount").alias("avg_tip"))
+
+    # Sort by avg_tip descending
+    result = result.orderBy(col("avg_tip").desc())
 
     # Trigger job
     result.collect()
