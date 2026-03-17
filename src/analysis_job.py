@@ -1,16 +1,12 @@
+import argparse
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import avg
+from config import SPARK_MASTER, HDFS_DATA_PATH, WORKERS, EXECUTOR_CORES, MEMORY
 
-# Change for horizontal scaling
-WORKERS = 3
 
-# Change for vertical scaling
-EXECUTOR_CORES = 2
-MEMORY = "2g" # (max 2.8g)
-
-def spark_pipeline(workers = WORKERS, executor_cores = EXECUTOR_CORES, memory = MEMORY):
+def spark_pipeline(workers=WORKERS, executor_cores=EXECUTOR_CORES, memory=MEMORY):
     spark = SparkSession.builder \
-        .master("spark://192.168.2.37:7077") \
+        .master(SPARK_MASTER) \
         .appName("analysis-task") \
         .config("spark.dynamicAllocation.enabled", "false") \
         .config("spark.executor.instances", workers) \
@@ -18,18 +14,27 @@ def spark_pipeline(workers = WORKERS, executor_cores = EXECUTOR_CORES, memory = 
         .config("spark.executor.memory", memory) \
         .getOrCreate()
 
-    # Shuffle optimization suggested by ChatGPT
-    spark.conf.set("spark.sql.shuffle.partitions", 2 * WORKERS * EXECUTOR_CORES)
+    spark.conf.set("spark.sql.shuffle.partitions", 2 * workers * executor_cores)
     spark.conf.set("spark.sql.files.maxPartitionBytes", "256MB")
 
-    # Create pipe for loading and analyzing data
-    df = spark.read.parquet("hdfs:///user/ubuntu/nyc_tlc/final_downloads/").select("tip_amount", "DOLocationID")
+    df = spark.read.parquet(HDFS_DATA_PATH).select("tip_amount", "DOLocationID")
     result = df.groupBy("DOLocationID").agg(avg("tip_amount").alias("avg_tip"))
 
-    # Trigger job
     result.collect()
 
     spark.stop()
 
+
 if __name__ == "__main__":
-    spark_pipeline(workers=WORKERS, executor_cores=EXECUTOR_CORES)
+    parser = argparse.ArgumentParser(description="NYC Taxi Analysis Job")
+    parser.add_argument("--workers",        type=int, default=WORKERS)
+    parser.add_argument("--executor-cores", type=int, default=EXECUTOR_CORES)
+    parser.add_argument("--memory",         type=str, default=MEMORY)
+    args = parser.parse_args()
+
+    spark_pipeline(
+        workers=args.workers,
+        executor_cores=args.executor_cores,
+        memory=args.memory,
+    )
+
