@@ -18,7 +18,7 @@ echo ""
 echo "[BOOTSTRAP] Syncing scripts to workers..."
 for ip in "${WORKER_IPS[@]}"; do
     ssh $SSH_OPTS "${REMOTE_USER}@${ip}" "mkdir -p ${REMOTE_DIR}"
-    scp $SSH_OPTS -r "${SCRIPT_DIR}/"*.sh "${REMOTE_USER}@${ip}:${REMOTE_DIR}/"
+    scp $SSH_OPTS -r "${SCRIPT_DIR}/"*.sh "${SCRIPT_DIR}/cluster.env" "${REMOTE_USER}@${ip}:${REMOTE_DIR}/"
 done
 
 
