@@ -7,12 +7,13 @@ THIS_IP="$2"
 
 echo "[WORKER ${THIS_HOST}] Updating /etc/hosts..."
 {
-  echo "127.0.0.1 localhost"
-  echo "${MASTER_IP} ${MASTER_HOST}"
-  for i in "${!WORKER_HOSTS[@]}"; do
-    echo "${WORKER_IPS[$i]} ${WORKER_HOSTS[$i]}"
-  done
-} | sudo tee /etc/hosts >/dev/null
+    echo ""
+    echo "# Cluster hosts"
+    echo "${MASTER_IP} ${MASTER_HOST}"
+    for i in "${!WORKER_HOSTS[@]}"; do
+        echo "${WORKER_IPS[$i]} ${WORKER_HOSTS[$i]}"
+    done
+} | sudo tee -a /etc/hosts >/dev/null
 
 echo "[WORKER ${THIS_HOST}] Writing core-site.xml..."
 cat >"${HADOOP_HOME}/etc/hadoop/core-site.xml" <<EOF
@@ -38,7 +39,7 @@ cat >"${HADOOP_HOME}/etc/hadoop/hdfs-site.xml" <<EOF
 </configuration>
 EOF
 
-echo "[WORKER ${THIS_HOST}] Resetting DataNode directory (safe after snapshot restore)..."
+echo "[WORKER ${THIS_HOST}] Resetting DataNode directory (safe for snapshots)..."
 sudo rm -rf "${HDFS_DATA_DIR:?}/"*
 
-echo "[WORKER ${THIS_HOST}] Done!"
+echo "[WORKER ${THIS_HOST}] Worker configuration applied."

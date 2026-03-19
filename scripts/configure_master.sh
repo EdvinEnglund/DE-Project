@@ -2,16 +2,21 @@
 set -euo pipefail
 source "$(dirname "$0")/cluster.env"
 
-echo "[MASTER] Writing /etc/hosts ..."
+echo "[MASTER] Updating /etc/hosts safely..."
 {
-  echo "127.0.0.1 localhost"
-  echo "${MASTER_IP} ${MASTER_HOST}"
-  for i in "${!WORKER_HOSTS[@]}"; do
-    echo "${WORKER_IPS[$i]} ${WORKER_HOSTS[$i]}"
-  done
-} | sudo tee /etc/hosts >/dev/null
+    echo ""
+    echo "# Cluster hosts"
+    echo "${MASTER_IP} ${MASTER_HOST}"
+    for i in "${!WORKER_HOSTS[@]}"; do
+        echo "${WORKER_IPS[$i]} ${WORKER_HOSTS[$i]}"
+    done
+} | sudo tee -a /etc/hosts >/dev/null
 
-echo "[MASTER] Writing core-site.xml ..."
+# OPTIONAL: uncomment if snapshots include old NameNode metadata
+echo "[MASTER] Resetting NameNode directory..."
+sudo rm -rf "${HDFS_NAME_DIR:?}"/*
+
+echo "[MASTER] Writing core-site.xml..."
 cat >"${HADOOP_HOME}/etc/hadoop/core-site.xml" <<EOF
 <configuration>
   <property>
@@ -21,7 +26,7 @@ cat >"${HADOOP_HOME}/etc/hadoop/core-site.xml" <<EOF
 </configuration>
 EOF
 
-echo "[MASTER] Writing hdfs-site.xml ..."
+echo "[MASTER] Writing hdfs-site.xml..."
 cat >"${HADOOP_HOME}/etc/hadoop/hdfs-site.xml" <<EOF
 <configuration>
   <property>
@@ -39,11 +44,11 @@ cat >"${HADOOP_HOME}/etc/hadoop/hdfs-site.xml" <<EOF
 </configuration>
 EOF
 
-echo "[MASTER] Writing Hadoop workers ..."
+echo "[MASTER] Writing Hadoop workers file..."
 printf "%s\n" "${WORKER_HOSTS[@]}" > "${HADOOP_HOME}/etc/hadoop/workers"
 
-echo "[MASTER] Writing Spark config ..."
-cat >"${SPARK_HOME}/conf/spark-env.sh" <<EOF
+echo "[MASTER] Writing Spark config..."
+cat > "${SPARK_HOME}/conf/spark-env.sh" <<EOF
 export SPARK_MASTER_HOST=${MASTER_IP}
 export SPARK_WORKER_CORES=${SPARK_WORKER_CORES}
 export SPARK_WORKER_MEMORY=${SPARK_WORKER_MEMORY}
@@ -53,5 +58,5 @@ EOF
 
 printf "%s\n" "${WORKER_HOSTS[@]}" > "${SPARK_HOME}/conf/workers"
 
-echo "[MASTER] Config applied!"
+echo "[MASTER] Master configuration applied!"
 ``
