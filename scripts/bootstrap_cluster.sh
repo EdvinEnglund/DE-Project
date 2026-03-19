@@ -1,34 +1,52 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Load environment configuration
 source "$(dirname "$0")/cluster.env"
 
 SCRIPT_DIR="$(dirname "$0")"
 REMOTE_DIR="/home/${REMOTE_USER}/scripts"
 
 echo "========================================"
-echo "  SNAPSHOT-SAFE HDFS + SPARK BOOTSTRAP"
+echo "  UPDATED SNAPSHOT-SAFE CLUSTER BOOTSTRAP"
 echo "========================================"
-echo ""
+
 
 ###############################################
-# 1. DISTRIBUTE SCRIPTS TO WORKERS
+# 1. PREPARE MASTER DIRECTORIES
+###############################################
+echo "[MASTER] Creating HDFS directories..."
+
+sudo mkdir -p "${HDFS_NAME_DIR}"
+sudo mkdir -p "${HDFS_DATA_DIR}"
+sudo chown -R "${REMOTE_USER}:${REMOTE_USER}" /data/hdfs
+
+echo "[MASTER] HDFS directories created and permissions fixed."
+
+
+###############################################
+# 2. DISTRIBUTE SCRIPTS + ENV TO WORKERS
 ###############################################
 echo "[BOOTSTRAP] Syncing scripts to workers..."
+
 for ip in "${WORKER_IPS[@]}"; do
     ssh $SSH_OPTS "${REMOTE_USER}@${ip}" "mkdir -p ${REMOTE_DIR}"
-    scp $SSH_OPTS -r "${SCRIPT_DIR}/"*.sh "${SCRIPT_DIR}/cluster.env" "${REMOTE_USER}@${ip}:${REMOTE_DIR}/"
+
+    # FIXED: copy both .sh files AND cluster.env
+    scp $SSH_OPTS \
+        "${SCRIPT_DIR}/"*.sh \
+        "${SCRIPT_DIR}/cluster.env" \
+        "${REMOTE_USER}@${ip}:${REMOTE_DIR}/"
 done
 
 
 ###############################################
-# FUNCTIONS USED BELOW
+# FUNCTIONS
 ###############################################
 
 update_hosts() {
-    local host_label="$1"
-    echo "[${host_label}] Updating /etc/hosts..."
+    local node="$1"
+
+    echo "[${node}] Updating /etc/hosts..."
     {
         echo ""
         echo "# Cluster hosts"
@@ -39,18 +57,15 @@ update_hosts() {
     } | sudo tee -a /etc/hosts >/dev/null
 }
 
+
 configure_master() {
-    echo "[MASTER] Applying master configuration..."
+    echo "[MASTER] Applying configuration..."
 
     update_hosts "MASTER"
 
-    # OPTIONAL NN FORMAT CLEAN (uncomment if snapshot contains stale metadata)
-    # echo "[MASTER] Resetting NameNode directory..."
-    # sudo rm -rf "${HDFS_NAME_DIR:?}/"*
-
     echo "[MASTER] Writing Hadoop configs..."
 
-    cat >"${HADOOP_HOME}/etc/hadoop/core-site.xml" <<EOF
+    cat > "${HADOOP_HOME}/etc/hadoop/core-site.xml" <<EOF
 <configuration>
   <property>
     <name>fs.defaultFS</name>
@@ -59,7 +74,7 @@ configure_master() {
 </configuration>
 EOF
 
-    cat >"${HADOOP_HOME}/etc/hadoop/hdfs-site.xml" <<EOF
+    cat > "${HADOOP_HOME}/etc/hadoop/hdfs-site.xml" <<EOF
 <configuration>
   <property>
     <name>dfs.replication</name>
@@ -79,6 +94,7 @@ EOF
     printf "%s\n" "${WORKER_HOSTS[@]}" > "${HADOOP_HOME}/etc/hadoop/workers"
 
     echo "[MASTER] Writing Spark config..."
+
     cat > "${SPARK_HOME}/conf/spark-env.sh" <<EOF
 export SPARK_MASTER_HOST=${MASTER_IP}
 export SPARK_WORKER_CORES=${SPARK_WORKER_CORES}
@@ -92,6 +108,7 @@ EOF
     echo "[MASTER] Master configuration complete."
 }
 
+
 configure_worker_remote() {
     local host="$1"
     local ip="$2"
@@ -100,8 +117,11 @@ ssh $SSH_OPTS "${REMOTE_USER}@${ip}" bash <<EOF
 set -euo pipefail
 source "${REMOTE_DIR}/cluster.env"
 
-echo "[WORKER ${host}] Starting configuration..."
+echo "[WORKER ${host}] Creating HDFS directories..."
+sudo mkdir -p "${HDFS_DATA_DIR}"
+sudo chown -R "${REMOTE_USER}:${REMOTE_USER}" /data/hdfs
 
+echo "[WORKER ${host}] Updating /etc/hosts..."
 {
     echo ""
     echo "# Cluster hosts"
@@ -112,17 +132,16 @@ echo "[WORKER ${host}] Starting configuration..."
 } | sudo tee -a /etc/hosts >/dev/null
 
 echo "[WORKER ${host}] Writing Hadoop configs..."
-
-cat >"\${HADOOP_HOME}/etc/hadoop/core-site.xml" <<EOCFG
+cat > "\${HADOOP_HOME}/etc/hadoop/core-site.xml" <<EOC
 <configuration>
   <property>
     <name>fs.defaultFS</name>
     <value>hdfs://${MASTER_IP}:9000</value>
   </property>
 </configuration>
-EOCFG
+EOC
 
-cat >"\${HADOOP_HOME}/etc/hadoop/hdfs-site.xml" <<EOCFG
+cat > "\${HADOOP_HOME}/etc/hadoop/hdfs-site.xml" <<EOC
 <configuration>
   <property>
     <name>dfs.replication</name>
@@ -133,9 +152,9 @@ cat >"\${HADOOP_HOME}/etc/hadoop/hdfs-site.xml" <<EOCFG
     <value>file://${HDFS_DATA_DIR}</value>
   </property>
 </configuration>
-EOCFG
+EOC
 
-echo "[WORKER ${host}] Resetting DataNode directory..."
+echo "[WORKER ${host}] Resetting datanode directory..."
 sudo rm -rf "${HDFS_DATA_DIR:?}/"*
 
 echo "[WORKER ${host}] Done."
@@ -144,15 +163,12 @@ EOF
 
 
 ###############################################
-# 2. CONFIGURE MASTER NODE
+# 3. CONFIGURE MASTER & WORKERS
 ###############################################
-echo "[BOOTSTRAP] Configuring master node..."
+
+echo "[BOOTSTRAP] Configuring master..."
 configure_master
 
-
-###############################################
-# 3. CONFIGURE WORKER NODES
-###############################################
 echo "[BOOTSTRAP] Configuring workers..."
 for i in "${!WORKER_HOSTS[@]}"; do
     configure_worker_remote "${WORKER_HOSTS[$i]}" "${WORKER_IPS[$i]}"
@@ -160,23 +176,29 @@ done
 
 
 ###############################################
-# 4. START HDFS + SPARK
+# 4. START SERVICES
 ###############################################
-echo "[BOOTSTRAP] Stopping any stale Spark services..."
+echo "[BOOTSTRAP] Stopping old Spark processes..."
 "${SPARK_HOME}/sbin/stop-workers.sh" || true
 "${SPARK_HOME}/sbin/stop-master.sh" || true
+
+echo "[BOOTSTRAP] Formatting NameNode (only if empty)..."
+if [ ! -d "${HDFS_NAME_DIR}/current" ]; then
+    hdfs namenode -format -force
+fi
 
 echo "[BOOTSTRAP] Starting HDFS..."
 "${HADOOP_HOME}/sbin/start-dfs.sh"
 
-echo "[BOOTSTRAP] Starting Spark master..."
+echo "[BOOTSTRAP] Starting Spark Master..."
 "${SPARK_HOME}/sbin/start-master.sh"
 
-echo "[BOOTSTRAP] Starting Spark workers..."
+echo "[BOOTSTRAP] Starting Spark Workers..."
 "${SPARK_HOME}/sbin/start-workers.sh"
 
+echo ""
 echo "========================================"
 echo "  CLUSTER READY!"
-echo "  HDFS: hdfs://${MASTER_IP}:9000"
-echo "  SPARK MASTER: ${SPARK_MASTER_URL}"
+echo "  NameNode     : hdfs://${MASTER_IP}:9000"
+echo "  Spark Master : spark://${MASTER_IP}:7077"
 echo "========================================"
