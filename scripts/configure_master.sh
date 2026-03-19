@@ -2,8 +2,7 @@
 set -euo pipefail
 source "$(dirname "$0")/cluster.env"
 
-# 1) Hostname and /etc/hosts
-sudo hostnamectl set-hostname "${MASTER_HOST}"
+echo "[MASTER] Writing /etc/hosts ..."
 {
   echo "127.0.0.1 localhost ${MASTER_HOST}"
   echo "${MASTER_IP} ${MASTER_HOST}"
@@ -12,19 +11,18 @@ sudo hostnamectl set-hostname "${MASTER_HOST}"
   done
 } | sudo tee /etc/hosts >/dev/null
 
-# 2) Hadoop core/hdfs config
+echo "[MASTER] Writing core-site.xml ..."
 cat >"${HADOOP_HOME}/etc/hadoop/core-site.xml" <<EOF
-<?xml version="1.0"?>
 <configuration>
   <property>
     <name>fs.defaultFS</name>
-    <value>${HDFS_NN_RPC}</value>
+    <value>hdfs://${MASTER_IP}:9000</value>
   </property>
 </configuration>
 EOF
 
+echo "[MASTER] Writing hdfs-site.xml ..."
 cat >"${HADOOP_HOME}/etc/hadoop/hdfs-site.xml" <<EOF
-<?xml version="1.0"?>
 <configuration>
   <property>
     <name>dfs.replication</name>
@@ -41,12 +39,10 @@ cat >"${HADOOP_HOME}/etc/hadoop/hdfs-site.xml" <<EOF
 </configuration>
 EOF
 
-# Hadoop workers file (who will run DataNode)
-mkdir -p "${HADOOP_HOME}/etc/hadoop"
+echo "[MASTER] Writing Hadoop workers ..."
 printf "%s\n" "${WORKER_HOSTS[@]}" > "${HADOOP_HOME}/etc/hadoop/workers"
 
-# 3) Spark master + workers config
-mkdir -p "${SPARK_HOME}/conf"
+echo "[MASTER] Writing Spark config ..."
 cat >"${SPARK_HOME}/conf/spark-env.sh" <<EOF
 export SPARK_MASTER_HOST=${MASTER_IP}
 export SPARK_WORKER_CORES=${SPARK_WORKER_CORES}
@@ -57,8 +53,5 @@ EOF
 
 printf "%s\n" "${WORKER_HOSTS[@]}" > "${SPARK_HOME}/conf/workers"
 
-# 4) Format NameNode only if new
-if [[ ! -f "${HDFS_NAME_DIR}/current/VERSION" ]]; then
-  "${HADOOP_HOME}/bin/hdfs" namenode -format -force -nonInteractive
-fi
+echo "[MASTER] Config applied!"
 ``
