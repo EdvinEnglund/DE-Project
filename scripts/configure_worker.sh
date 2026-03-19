@@ -7,7 +7,7 @@ THIS_IP="$2"
 
 echo "[WORKER ${THIS_HOST}] Updating /etc/hosts..."
 {
-  echo "127.0.0.1 localhost ${THIS_HOST}"
+  echo "127.0.0.1 localhost"
   echo "${MASTER_IP} ${MASTER_HOST}"
   for i in "${!WORKER_HOSTS[@]}"; do
     echo "${WORKER_IPS[$i]} ${WORKER_HOSTS[$i]}"

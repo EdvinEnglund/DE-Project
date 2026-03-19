@@ -4,7 +4,7 @@ source "$(dirname "$0")/cluster.env"
 
 echo "[MASTER] Writing /etc/hosts ..."
 {
-  echo "127.0.0.1 localhost ${MASTER_HOST}"
+  echo "127.0.0.1 localhost"
   echo "${MASTER_IP} ${MASTER_HOST}"
   for i in "${!WORKER_HOSTS[@]}"; do
     echo "${WORKER_IPS[$i]} ${WORKER_HOSTS[$i]}"
