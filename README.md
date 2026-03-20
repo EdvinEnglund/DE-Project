@@ -37,7 +37,7 @@
 
 14.python3 importTaxiFiles.py
     
-15.(Optional, runs the analysis job seperately) python3 analysis_job_final.py --[TOTAL MAX CORES] --[CORES PER EXECUTOR] --[MEMORY] --[NUMBER OF WORKERS] (last on only for prints in benchmark test)
+15.(Optional, runs the analysis job seperately. result.collect() on line 39 must be changed to result.show() for results to be showed if run standalone) python3 analysis_job_final.py --[TOTAL MAX CORES] --[CORES PER EXECUTOR] --[MEMORY] --[NUMBER OF WORKERS] (last on only for prints in benchmark test)
 
 
 
