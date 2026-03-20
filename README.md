@@ -21,5 +21,10 @@
 7.$nano cluster.env
 8.edit MASTER_HOST, MASTER_IP, WORKER_HOSTS and WORKER_IPS with the names and IPs of the new VMs
 9.$bash bootstrap_cluster.sh
+10. nano importTaxiFiles.py
+11. edit TARGET_SIZE_GB to desired download size
+12. edit HDFS_BIN and HDFS_DIR to desired HDFS dir
+13. edit "year" and "min_year" to desired measure years.
+14. python3 importTaxiFiles.py
 
 
