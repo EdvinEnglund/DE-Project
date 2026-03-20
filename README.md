@@ -26,5 +26,7 @@
 12. edit HDFS_BIN and HDFS_DIR to desired HDFS dir
 13. edit "year" and "min_year" to desired measure years.
 14. python3 importTaxiFiles.py
+15. python3 analysis_job_final.py --[TOTAL MAX CORES] --[CORES PER EXECUTOR] --[MEMORY] --[NUMBER OF WORKERS] (last on only for prints in benchmark test)
+
 
 
