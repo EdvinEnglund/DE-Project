@@ -24,16 +24,14 @@ echo "[MASTER] HDFS directories created and permissions fixed."
 
 
 ###############################################
-# 2. DISTRIBUTE SCRIPTS + ENV TO WORKERS
+# 2. DISTRIBUTE ENV TO WORKERS
 ###############################################
-echo "[BOOTSTRAP] Syncing scripts to workers..."
+echo "[BOOTSTRAP] Syncing ENV to workers..."
 
 for ip in "${WORKER_IPS[@]}"; do
     ssh $SSH_OPTS "${REMOTE_USER}@${ip}" "mkdir -p ${REMOTE_DIR}"
 
-    # FIXED: copy both .sh files AND cluster.env
     scp $SSH_OPTS \
-        "${SCRIPT_DIR}/"*.sh \
         "${SCRIPT_DIR}/cluster.env" \
         "${REMOTE_USER}@${ip}:${REMOTE_DIR}/"
 done
@@ -199,6 +197,4 @@ echo "[BOOTSTRAP] Starting Spark Workers..."
 echo ""
 echo "========================================"
 echo "  CLUSTER READY!"
-echo "  NameNode     : hdfs://${MASTER_IP}:9000"
-echo "  Spark Master : spark://${MASTER_IP}:7077"
 echo "========================================"
