@@ -16,17 +16,28 @@
 3.Associate floating IP to the master VM
 
 4.SSH into the master VM
+
 5.Run   $git clone https://github.com/EdvinEnglund/DE-Project.git
+
 6.$cd DE-Project/scripts
+
 7.$nano cluster.env
+
 8.edit MASTER_HOST, MASTER_IP, WORKER_HOSTS and WORKER_IPS with the names and IPs of the new VMs
+
 9.$bash bootstrap_cluster.sh
-10. nano importTaxiFiles.py
-11. edit TARGET_SIZE_GB to desired download size
-12. edit HDFS_BIN and HDFS_DIR to desired HDFS dir
-13. edit "year" and "min_year" to desired measure years.
-14. python3 importTaxiFiles.py
-15. python3 analysis_job_final.py --[TOTAL MAX CORES] --[CORES PER EXECUTOR] --[MEMORY] --[NUMBER OF WORKERS] (last on only for prints in benchmark test)
+
+10.nano importTaxiFiles.py
+
+11.edit TARGET_SIZE_GB to desired download size
+
+12.edit HDFS_BIN and HDFS_DIR to desired HDFS dir
+
+13.edit "year" and "min_year" to desired measure years.
+
+14.python3 importTaxiFiles.py
+    
+15.(Optional, runs the analysis job seperately) python3 analysis_job_final.py --[TOTAL MAX CORES] --[CORES PER EXECUTOR] --[MEMORY] --[NUMBER OF WORKERS] (last on only for prints in benchmark test)
 
 
 
