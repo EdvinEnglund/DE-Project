@@ -70,7 +70,7 @@ for cores in 1 2
 do 
   echo "Running vertical scaling with $cores cores"
 
-  spark-submit ../src/analysis_jobTheo.py $cores $cores 2g 1
+  spark-submit ../src/analysis_job_final.py $cores $cores 2g 1
 
 done    
 

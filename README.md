@@ -1,23 +1,23 @@
 # DE-Project
 
 1.start master VM
-    instance snapshot: group16-master-snap
-    volume size: 25Gb
-    Flavor: ssc.medium
-    Networks: bypass.net
+instance snapshot: group16-master-snap
+volume size: 25Gb
+Flavor: ssc.medium
+Networks: bypass.net
 
 2.start worker VM
-    Count: 3
-    instance snapshot: group16-worker-snap
-    volume size: 25Gb
-    Flavor: ssc.medium
-    Networks: bypass.net
+Count: 3
+instance snapshot: group16-worker-snap
+volume size: 25Gb
+Flavor: ssc.medium
+Networks: bypass.net
 
 3.Associate floating IP to the master VM
 
 4.SSH into the master VM
 
-5.Run   $git clone https://github.com/EdvinEnglund/DE-Project.git
+5.Run $git clone https://github.com/EdvinEnglund/DE-Project.git
 
 6.$cd DE-Project/scripts
 
@@ -36,9 +36,9 @@
 13.edit "year" and "min_year" to desired measure years.
 
 14.python3 importTaxiFiles.py
-    
+
 15.(Optional, runs the analysis job seperately. result.collect() on line 39 must be changed to result.show() for results to be showed if run standalone) python3 analysis_job_final.py --[TOTAL MAX CORES] --[CORES PER EXECUTOR] --[MEMORY] --[NUMBER OF WORKERS] (last on only for prints in benchmark test)
 
 16. To run the horizontal scaling: Run the following command: bash scripts/horizontal_scaling.sh
 
-
+17. To run vertical scaling experiment: $scripts/vertical_scaling_test.sh
